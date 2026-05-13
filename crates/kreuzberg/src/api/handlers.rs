@@ -541,6 +541,7 @@ pub(crate) async fn embed_handler(JsonApi(_request): JsonApi<EmbedRequest>) -> R
 /// - `schema_name`: Schema name (optional, default "extraction")
 /// - `model`: LLM model string e.g. "openai/gpt-4o" (required)
 /// - `api_key`: API key for the LLM provider (optional)
+/// - `base_url`: Base URL for the LLM provider (optional)
 /// - `prompt`: Custom Jinja2 prompt template (optional)
 /// - `strict`: "true"/"false" for strict mode (optional)
 #[utoipa::path(
@@ -570,6 +571,7 @@ pub(crate) async fn extract_structured_handler(
     let mut schema_name = "extraction".to_string();
     let mut model: Option<String> = None;
     let mut api_key: Option<String> = None;
+    let mut base_url: Option<String> = None;
     let mut prompt: Option<String> = None;
     let mut strict = false;
 
@@ -647,6 +649,14 @@ pub(crate) async fn extract_structured_handler(
                         .map_err(|e| ApiError::validation(crate::error::KreuzbergError::validation(e.to_string())))?,
                 );
             }
+            "base_url" => {
+                base_url = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| ApiError::validation(crate::error::KreuzbergError::validation(e.to_string())))?,
+                );
+            }
             "prompt" => {
                 prompt = Some(
                     field
@@ -704,7 +714,7 @@ pub(crate) async fn extract_structured_handler(
         llm: crate::core::config::llm::LlmConfig {
             model: model_str,
             api_key,
-            base_url: None,
+            base_url,
             timeout_secs: None,
             max_retries: None,
             temperature: None,

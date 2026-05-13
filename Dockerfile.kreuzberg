@@ -1,0 +1,157 @@
+# =============================================================================
+# Kreuzberg with patches:
+#   1. base_url form param on /extract-structured (handlers.rs)
+#   2. KREUZBERG_VLM_OCR_API_KEY env var override (env.rs)
+# Built from original Dockerfile.core with --features all
+# =============================================================================
+FROM rust:1.91-trixie AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        cmake \
+        g++ \
+        pkg-config \
+        libssl-dev \
+        libleptonica-dev \
+        libtesseract-dev \
+        clang \
+        curl \
+        file \
+        && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set onnxruntime version (can be overridden via build-arg)
+ARG ONNXRUNTIME_VERSION=1.24.2
+ARG TARGETARCH
+ENV ONNXRUNTIME_VERSION=${ONNXRUNTIME_VERSION}
+
+# Download and extract ONNX Runtime
+RUN mkdir -p /build/onnxruntime && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        ORT_ARCH="aarch64"; \
+    else \
+        ORT_ARCH="x64"; \
+    fi && \
+    curl -fL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-${ORT_ARCH}-${ONNXRUNTIME_VERSION}.tgz" \
+        -o /build/onnxruntime.tgz && \
+    tar -xzf /build/onnxruntime.tgz -C /build/onnxruntime --strip-components=1 && \
+    rm /build/onnxruntime.tgz
+
+# Copy workspace manifests and crates
+COPY Cargo.toml Cargo.lock ./
+COPY crates/kreuzberg/ crates/kreuzberg/
+COPY crates/kreuzberg-cli/ crates/kreuzberg-cli/
+COPY crates/kreuzberg-tesseract/ crates/kreuzberg-tesseract/
+COPY crates/kreuzberg-paddle-ocr/ crates/kreuzberg-paddle-ocr/
+
+# Remove workspace members that aren't included (Ruby, Node, Python, PHP, tools, e2e)
+RUN sed -i '/kreuzberg-py/d; /kreuzberg_rb/d; /kreuzberg-node/d; /kreuzberg-ffi/d; /kreuzberg-php/d; /kreuzberg_rustler/d; /kreuzberg_nif/d; /packages\/dart\/rust/d; /packages\/swift\/rust/d; /"crates\/kreuzberg-wasm"/d; /^\[profile\.release\.package\.kreuzberg-wasm\]$/,$d; /benchmark-harness/d; /e2e-generator/d; /snippet-runner/d; /e2e\/rust/d' Cargo.toml
+
+# Build release binary with all features
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --package kreuzberg-cli --features all && \
+    cp target/release/kreuzberg /build/kreuzberg && \
+    strip /build/kreuzberg
+
+# =============================================================================
+# Runtime Stage - Minimal runtime environment
+# =============================================================================
+FROM debian:trixie-slim
+
+# OCI labels for container metadata
+LABEL org.opencontainers.image.source="https://github.com/kreuzberg-dev/kreuzberg"
+LABEL org.opencontainers.image.description="Kreuzberg document intelligence - core variant with patches"
+LABEL org.opencontainers.image.licenses="MIT"
+
+WORKDIR /app
+
+# Download and install dependencies (Core version)
+ARG TARGETARCH
+
+# Install runtime dependencies and download binaries
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-osd \
+        tesseract-ocr-spa \
+        tesseract-ocr-fra \
+        tesseract-ocr-deu \
+        tesseract-ocr-ita \
+        tesseract-ocr-por \
+        tesseract-ocr-chi-sim \
+        tesseract-ocr-chi-tra \
+        tesseract-ocr-jpn \
+        tesseract-ocr-ara \
+        tesseract-ocr-rus \
+        tesseract-ocr-hin \
+        && \
+    # Clean up
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Copy ONNX Runtime libraries from builder
+COPY --from=builder /build/onnxruntime/lib/libonnxruntime.so* /usr/local/lib/
+RUN ldconfig
+
+# Copy binary from builder
+COPY --from=builder /build/kreuzberg /usr/local/bin/kreuzberg
+RUN chmod +x /usr/local/bin/kreuzberg
+
+# Create non-root user
+RUN groupadd -r kreuzberg && \
+    useradd -r -g kreuzberg -d /app -s /sbin/nologin kreuzberg && \
+    mkdir -p /app/.kreuzberg && \
+    chown -R kreuzberg:kreuzberg /app
+
+# Create config directories for volume mounts
+RUN mkdir -p /etc/kreuzberg /app/.config/kreuzberg && \
+    chown -R kreuzberg:kreuzberg /etc/kreuzberg /app/.config/kreuzberg
+
+# Create Hugging Face cache directory for embeddings models
+RUN mkdir -p /app/.kreuzberg/huggingface && \
+    chown -R kreuzberg:kreuzberg /app/.kreuzberg/huggingface
+
+# Create PaddleOCR model cache directory
+RUN mkdir -p /app/.kreuzberg/paddle-ocr && \
+    chown -R kreuzberg:kreuzberg /app/.kreuzberg/paddle-ocr
+
+# Ensure read permissions on tessdata files for non-root user
+RUN set -eux; \
+    echo "Setting up tessdata permissions..."; \
+    for dir in /usr/share/tesseract-ocr/*/tessdata /usr/share/tesseract-ocr/tessdata /usr/share/tessdata; do \
+        if [ -d "$dir" ]; then \
+            chmod -R a+rx "$dir" 2>/dev/null || true; \
+            if [ -f "$dir/eng.traineddata" ]; then \
+                echo "✓ Found tessdata with eng.traineddata at: $dir"; \
+            fi; \
+        fi; \
+    done; \
+    echo "✓ Tessdata permissions configured"
+
+# Environment configuration.
+ENV KREUZBERG_CACHE_DIR=/app/.kreuzberg \
+    HF_HOME=/app/.kreuzberg/huggingface \
+    RUST_LOG=info \
+    LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib
+
+USER kreuzberg
+
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD ["/usr/local/bin/kreuzberg", "--version"]
+
+# Set kreuzberg as entrypoint for flexible command usage
+# Default: Start API server (can be overridden for CLI or MCP mode)
+ENTRYPOINT ["kreuzberg"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8000"]

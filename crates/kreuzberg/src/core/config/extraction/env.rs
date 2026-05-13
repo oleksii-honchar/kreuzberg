@@ -28,6 +28,7 @@ impl ExtractionConfig {
     /// - `KREUZBERG_LLM_API_KEY`: API key for the structured extraction LLM provider
     /// - `KREUZBERG_LLM_BASE_URL`: Custom base URL for the structured extraction LLM provider
     /// - `KREUZBERG_VLM_OCR_MODEL`: VLM model for vision-based OCR (e.g., "openai/gpt-4o")
+    /// - `KREUZBERG_VLM_OCR_API_KEY`: API key for the VLM OCR LLM provider
     /// - `KREUZBERG_VLM_EMBEDDING_MODEL`: LLM model for embedding generation (e.g., "openai/text-embedding-3-small")
     /// - `KREUZBERG_EMBEDDING_PLUGIN_NAME`: Name of an in-process embedding backend registered via `plugins::register_embedding_backend`
     /// - `KREUZBERG_MSG_FALLBACK_CODEPAGE`: (deferred) Windows codepage for MSG PT_STRING8 fallback
@@ -344,6 +345,34 @@ impl ExtractionConfig {
                     });
                 } else if let Some(ref mut vlm) = ocr.vlm_config {
                     vlm.model = value;
+                }
+            }
+        }
+
+        // KREUZBERG_VLM_OCR_API_KEY override
+        if let Ok(value) = std::env::var("KREUZBERG_VLM_OCR_API_KEY") {
+            if value.is_empty() {
+                return Err(KreuzbergError::Validation {
+                    message: "KREUZBERG_VLM_OCR_API_KEY must not be empty".to_string(),
+                    source: None,
+                });
+            }
+            if self.ocr.is_none() {
+                self.ocr = Some(OcrConfig::default());
+            }
+            if let Some(ref mut ocr) = self.ocr {
+                if ocr.vlm_config.is_none() {
+                    ocr.vlm_config = Some(super::super::llm::LlmConfig {
+                        model: String::new(),
+                        api_key: Some(value),
+                        base_url: None,
+                        timeout_secs: None,
+                        max_retries: None,
+                        temperature: None,
+                        max_tokens: None,
+                    });
+                } else if let Some(ref mut vlm) = ocr.vlm_config {
+                    vlm.api_key = Some(value);
                 }
             }
         }
