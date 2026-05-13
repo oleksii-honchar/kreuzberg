@@ -174,9 +174,11 @@ build_image() {
   echo "  Local: ${local_tag}"
   echo ""
 
-  local cache_opts=()
+  local cache_opts
   if [ "$NO_CACHE" = true ]; then
-    cache_opts+=(--no-cache)
+    cache_opts="--no-cache"
+  else
+    cache_opts=""
   fi
 
   run_cmd docker buildx build \
@@ -186,7 +188,7 @@ build_image() {
     --tag "${image_tag}" \
     --file "$FORK_DIR/$dockerfile" \
     --progress=plain \
-    "${cache_opts[@]}" \
+    $cache_opts \
     "$FORK_DIR" \
     2>&1
 
